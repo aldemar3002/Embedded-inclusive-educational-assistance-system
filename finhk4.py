@@ -2,7 +2,6 @@ import os
 import time
 import cv2
 import numpy as np
-import pytesseract
 import pygame
 import tempfile
 import pyautogui
@@ -10,17 +9,26 @@ import mediapipe as mp
 import speech_recognition as sr
 from gtts import gTTS
 from google.cloud import vision, language_v1
-import speech_recognition as sr
 import pyttsx3
-import time
 
-# Configurar la ruta a Tesseract en Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Users\maria\AppData\Local\Programs\Tesseract-OCR\tesseract.exe'
+# Configurar la ruta a Tesseract y las credenciales de Google en Windows
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = r"C:\Users\maria\Downloads\psychic-iridium-426821-k3-250cf6f5b095.json"
 
 # Inicializar pygame para reproducir audio
 pygame.mixer.init()
 
-# Función para convertir texto a voz
+# Clientes de Google Cloud
+client_vision = vision.ImageAnnotatorClient()
+client_language = language_v1.LanguageServiceClient()
+
+# Configuración de pyttsx3 para convertir texto a voz
+engine = pyttsx3.init()
+
+def speak_text(text):
+    """Convierte texto a voz y lo reproduce."""
+    engine.say(text)
+    engine.runAndWait()
+
 def text_to_speech(text, lang='es'):
     try:
         tts = gTTS(text=text, lang=lang, slow=False)
@@ -31,6 +39,7 @@ def text_to_speech(text, lang='es'):
         pygame.mixer.music.play()
         while pygame.mixer.music.get_busy():
             time.sleep(1)
+        pygame.mixer.music.unload()  # Asegurarse de que el archivo no esté siendo utilizado
         os.remove(temp_filename)
     except Exception as e:
         print(f"Error en text_to_speech: {e}")
@@ -47,12 +56,22 @@ def process_frame_and_extract_text(frame):
         mask = cv2.bitwise_or(mask1, mask2)
         red_only = cv2.bitwise_and(frame, frame, mask=mask)
         gray = cv2.cvtColor(red_only, cv2.COLOR_BGR2GRAY)
-        gray = cv2.medianBlur(gray, 3)
-        gray = cv2.equalizeHist(gray)
-        binary_image = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 11, 2)
-        inverted_binary_image = cv2.bitwise_not(binary_image)
-        custom_config = r'-c tessedit_char_whitelist=abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 --psm 6'
-        text = pytesseract.image_to_string(inverted_binary_image, lang='eng', config=custom_config)
+        
+        # Guardar imagen en un archivo temporal para enviarla a Google Cloud Vision
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            temp_filename = temp_file.name
+            cv2.imwrite(temp_filename, gray)
+        
+        # Leer la imagen y procesarla con Google Cloud Vision OCR
+        with open(temp_filename, 'rb') as image_file:
+            content = image_file.read()
+            image = vision.Image(content=content)
+            response = client_vision.text_detection(image=image)
+            text = response.text_annotations[0].description if response.text_annotations else ""
+        
+        # Eliminar el archivo temporal
+        os.remove(temp_filename)
+        
         return text.strip()
     except Exception as e:
         print(f"Error al procesar el frame: {e}")
@@ -68,7 +87,7 @@ def main1():
         return
     text_to_speech("Aplicación uno iniciada. Presiona Ctrl+C para salir.")
     last_capture_time = time.time()
-    capture_interval = 5
+    capture_interval = 1
     try:
         while True:
             ret, frame = cap.read()
@@ -126,19 +145,18 @@ def main2():
     cv2.destroyAllWindows()
     text_to_speech("Fin del seguimiento facial.")
 
-def main3():
-    # Configuración inicial de APIs
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = r"C:\Users\maria\Downloads\psychic-iridium-426821-k3-250cf6f5b095.json"
-    client_vision = vision.ImageAnnotatorClient()
-    client_language = language_v1.LanguageServiceClient()
+def main3(ip):
+    def get_image_description(frame):
+        """Obtiene descripciones de un frame usando Google Cloud Vision y mejora con Natural Language."""
+        _, buffer = cv2.imencode('.jpg', frame)
+        image_bytes = buffer.tobytes()
+        image = vision.Image(content=image_bytes)
+        response = client_vision.label_detection(image=image)
+        labels = response.label_annotations
+        descriptions = [label.description for label in labels]
 
-# Configuración de pyttsx3 para convertir texto a voz
-    engine = pyttsx3.init()
-
-    def speak_text(text):
-        """Convierte texto a voz y lo reproduce."""
-        engine.say(text)
-        engine.runAndWait()
+        description_text = " ".join(descriptions) if descriptions else "No se pudieron identificar elementos distintivos en este cuadro."
+        return analyze_text(description_text)
 
     def analyze_text(text):
         """Analiza el texto utilizando Google Cloud Natural Language para extraer entidades y mejorar la descripción."""
@@ -153,30 +171,15 @@ def main3():
             enhanced_description = text  # Usar texto original si no se encontraron entidades
         return enhanced_description
 
-    def get_image_description(frame):
-        """Obtiene descripciones de un frame usando Google Cloud Vision y mejora con Natural Language."""
-        _, buffer = cv2.imencode('.jpg', frame)
-        image_bytes = buffer.tobytes()
-        image = vision.Image(content=image_bytes)
-        response = client_vision.label_detection(image=image)
-        labels = response.label_annotations
-        descriptions = [label.description for label in labels]
-
-        description_text = " ".join(descriptions) if descriptions else "No se pudieron identificar elementos distintivos en este cuadro."
-        return analyze_text(description_text)
-
     def get_droidcam_frame(ip):
         """Obtiene un fotograma de DroidCam usando la IP especificada."""
         cap = cv2.VideoCapture(f"http://{ip}:4747/video")
-        time.sleep(3)
         success, frame = cap.read()
         cap.release()
         return frame if success else None
 
-    def process_droidcam_frame(ip, interval=10):
+    def process_droidcam_frame(ip, interval=20):
         """Procesa un fotograma de DroidCam cada intervalo de segundos."""
-        
-        
         while True:
             frame = get_droidcam_frame(ip)
             if frame is not None:
@@ -210,12 +213,7 @@ def main3():
                 print(error_message)
                 speak_text(error_message)
 
-    # Dirección IP de DroidCam
-    droidcam_ip = "10.50.94.155"  # Reemplaza con la IP correcta
-
-    # Ejecutar el escuchador de comandos
-    listen_for_command(droidcam_ip)
-
+    listen_for_command(ip)
 
 def recognize_speech_and_execute():
     recognizer = sr.Recognizer()
@@ -227,12 +225,12 @@ def recognize_speech_and_execute():
             command = recognizer.recognize_google(audio, language='es-ES')
             text_to_speech(f"Comando reconocido: {command}")
             print(f"Comando reconocido: {command}")
-            if "aplicación uno" in command.lower() or "aplicación 1" in command.lower():
+            if "aplicación 1" in command.lower() or "aplicación uno" in command.lower():
                 main1()
             elif "aplicación 2" in command.lower() or "aplicación dos" in command.lower():
                 main2()
             elif "aplicación 3" in command.lower() or "aplicación tres" in command.lower():
-                main3()
+                main3("10.50.94.155")  # IP de DroidCam
             else:
                 text_to_speech("Comando no reconocido")
         except sr.UnknownValueError:
@@ -240,7 +238,6 @@ def recognize_speech_and_execute():
         except sr.RequestError as e:
             text_to_speech(f"Error del servicio de reconocimiento de voz; {e}")
 
-
 if __name__ == "__main__":
-    text_to_speech("Aplicación iniciada. Di 'aplicación uno','aplicación dos' o 'aplicación tres' para abrir una aplicación.")
+    text_to_speech("Aplicación iniciada. Di 'aplicación uno', 'aplicación dos' o 'aplicación tres' para abrir una aplicación.")
     recognize_speech_and_execute()
